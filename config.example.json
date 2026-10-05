@@ -1,0 +1,12 @@
+{
+  "branches": ["26.2"],
+  "origin": "https://updates.example.com/updates",
+  "files": "files",
+  "key": "signing.pem",
+  "secrets": "secrets.properties",
+  "checkout": "source.git",
+  "state": "state.json",
+  "javaHome": "runtime/jdk",
+  "binDir": "runtime/bin",
+  "gradleHome": "gradle"
+}

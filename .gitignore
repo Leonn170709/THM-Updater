@@ -1,0 +1,15 @@
+# Publish source files only. Runtime data and secrets are ignored by default.
+*
+!.gitignore
+!AGENTS.md
+!README.md
+!LICENSE
+!LICENSE.md
+!sync.py
+!test_sync.py
+!install.sh
+!config.example.json
+!runtime.py
+!test_runtime.py
+!SECURITY.md
+!secrets.properties.example
