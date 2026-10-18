@@ -51,7 +51,7 @@ cd data
 python3 sync.py config.json --watch
 ```
 
-Your process supervisor handles startup and logs. The installer does not register services or alter the private API. Failures preserve the previous feed and retry after two minutes.
+Your process supervisor handles startup and logs. The installer does not register services or alter the private API. Failures preserve the previous feed and retry after two minutes. GitHub rate limits pause release polling until the retry/reset time; DEV checks continue.
 
 ## Private HTTP integration
 

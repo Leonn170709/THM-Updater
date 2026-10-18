@@ -14,17 +14,19 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 
 MAX_JAR = 32 * 1024 * 1024
 MAX_PAYLOAD = 700 * 1024
-REPOSITORY = 'https://github.com/Leonn170709/THM-Addons.git'
-API = 'https://api.github.com/repos/Leonn170709/THM-Addons'
+REPOSITORY = 'https://github.com/Magnus-Krill/THM-Addons.git'
+API = 'https://api.github.com/repos/Magnus-Krill/THM-Addons'
 SAFE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z')
 SHA = re.compile(r'[a-f0-9]{40}\Z')
 ARTIFACT = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}/(?:dev/[a-f0-9]{40}|stable/[A-Za-z0-9][A-Za-z0-9._-]{0,99})\.jar\Z')
+_github_retry_at = 0
 
 
 def load_config(path):
@@ -263,6 +265,7 @@ def mirror_stable(config, repo, release, asset):
 
 
 def sync(config):
+    global _github_retry_at
     state = Path(config['state'])
     state.parent.mkdir(parents=True, exist_ok=True)
     if not config['branches'] or any(not SAFE.fullmatch(b) for b in config['branches']):
@@ -308,7 +311,9 @@ def sync(config):
         try:
             run('git', '-C', str(repo), 'fetch', '--tags', 'origin')
             page = 1
-            while True:
+            if time.time() < _github_retry_at:
+                print(f'GitHub release polling paused for {int(_github_retry_at - time.time()) + 1}s (API rate limit); DEV checks continue', flush=True)
+            while time.time() >= _github_retry_at:
                 releases = download(f'{API}/releases?per_page=100&page={page}')
                 if not releases:
                     break
@@ -347,6 +352,17 @@ def sync(config):
                 if len(releases) < 100:
                     break
                 page += 1
+        except urllib.error.HTTPError as error:
+            detail = f'HTTP {error.code}'
+            if error.code == 429 or error.headers.get('X-RateLimit-Remaining') == '0':
+                detail += ' (GitHub API rate limit exhausted)'
+                now = time.time()
+                retry_after = error.headers.get('Retry-After', '')
+                reset = error.headers.get('X-RateLimit-Reset', '')
+                _github_retry_at = max(now + 120, now + int(retry_after) if retry_after.isdigit() else now,
+                                       int(reset) + 1 if reset.isdigit() else now)
+            failures.append(f'GitHub releases: {detail}')
+            error.close()
         except Exception as error:
             failures.append(f'GitHub releases: {type(error).__name__}')
         finally:

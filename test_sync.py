@@ -16,6 +16,9 @@ import sync
 
 class UpdaterTests(unittest.TestCase):
     def setUp(self):
+        cooldown = patch.object(sync, '_github_retry_at', 0)
+        cooldown.start()
+        self.addCleanup(cooldown.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -266,6 +269,64 @@ assert 'SSH_AUTH_SOCK' not in os.environ
             self.assertEqual(job.call_count, 2)
             self.assertEqual(sleep.call_args_list[0].args, (120,))
         self.assertIn('Error: THM updater failed: failed build', stderr.getvalue())
+
+    def test_release_http_errors_report_status_without_leaking_urls_or_changing_feed(self):
+        repo = self.root / 'source.git'
+        repo.mkdir()
+        config = dict(self.config, checkout=str(repo))
+        state = Path(config['state'])
+        old = dict(entries=[], dev={'26.2': self.sha})
+        state.write_text(json.dumps(old))
+        feed = Path(config['files']) / 'feed.json'
+        feed.parent.mkdir()
+        feed.write_bytes(b'previous signed feed')
+        def git(*args, **kwargs):
+            return self.sha if 'rev-parse' in args else ''
+        for status, headers, limited in [(403, {'X-RateLimit-Remaining': '0'}, True),
+                                         (403, {}, False), (429, {}, True), (502, {}, False)]:
+            with self.subTest(status=status, limited=limited):
+                error = sync.urllib.error.HTTPError('https://example.com/private?token=secret', status,
+                                                   'sensitive response', headers, None)
+                with patch.object(sync, '_github_retry_at', 0), patch.object(sync, 'run', side_effect=git), patch.object(sync, 'download', side_effect=error):
+                    with self.assertRaises(RuntimeError) as caught:
+                        sync.sync(config)
+                expected = f'GitHub releases: HTTP {status}'
+                if limited:
+                    expected += ' (GitHub API rate limit exhausted)'
+                self.assertEqual(str(caught.exception), expected)
+                self.assertEqual(json.loads(state.read_text()), old)
+                self.assertEqual(feed.read_bytes(), b'previous signed feed')
+
+    def test_release_rate_limit_pauses_until_reset_without_pausing_dev_checks(self):
+        repo = self.root / 'source.git'
+        repo.mkdir()
+        config = dict(self.config, checkout=str(repo))
+        state = Path(config['state'])
+        old = dict(entries=[], dev={'26.2': self.sha})
+        state.write_text(json.dumps(old))
+        Path(config['files']).mkdir()
+        def git(*args, **kwargs):
+            return self.sha if 'rev-parse' in args else ''
+        for status, headers, retry_at in [
+            (403, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1600'}, 1601),
+            (429, {'Retry-After': '900'}, 1900),
+            (403, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': 'invalid'}, 1120)
+        ]:
+            with self.subTest(status=status, headers=headers), patch.object(sync, '_github_retry_at', 0):
+                error = sync.urllib.error.HTTPError('https://api.github.com/test', status, 'limited', headers, None)
+                with patch.object(sync, 'run', side_effect=git) as commands, patch.object(sync, 'download', side_effect=[error, []]) as download, patch.object(sync.time, 'time', return_value=1000) as clock, contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(RuntimeError, 'rate limit exhausted'):
+                        sync.sync(config)
+                    self.assertEqual(sync._github_retry_at, retry_at)
+                    clock.return_value = retry_at - 1
+                    sync.sync(config)
+                    self.assertEqual(download.call_count, 1, 'do not request releases before reset')
+                    clock.return_value = retry_at
+                    sync.sync(config)
+                    self.assertEqual(download.call_count, 2, 'retry releases after reset')
+                    branch_fetches = [call for call in commands.call_args_list if '+refs/heads/26.2:refs/remotes/origin/26.2' in call.args]
+                    self.assertEqual(len(branch_fetches), 3, 'DEV still checks for new commits during cooldown')
+                self.assertEqual(json.loads(state.read_text()), old)
 
     def test_unicode_notes_obey_java_utf16_limit(self):
         text = sync.limited_text('😀' * 20000, 20000, 'Fallback')
